@@ -3,6 +3,8 @@ dist/
 .venv/
 .tools/
 .npm-cache/
+.env
+.env.*
 __pycache__/
 *.pyc
 backend/app.db

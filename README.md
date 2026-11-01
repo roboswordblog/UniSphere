@@ -6,8 +6,7 @@ A hackathon starter for discovering college events, mapping them, and connecting
 - React with Vite
 - Leaflet with React Leaflet
 - Flask
-- PyTorch
-- SQL
+- SQLite locally, PostgreSQL/Neon in production
 
 ## Start Frontend
 ```bash
@@ -23,13 +22,44 @@ pip install -r backend/requirements.txt
 python backend/app.py
 ```
 
+## Database
+By default, UniSphere uses local SQLite at `backend/app.db`.
+
+To use Neon/PostgreSQL, set `DATABASE_URL` to your Neon Postgres connection string before starting Flask:
+```bash
+export DATABASE_URL="postgresql://USER:PASSWORD@HOST/neondb?sslmode=require"
+python backend/app.py
+```
+
+The Neon Auth JWKS URL is not the database connection string. Use the pooled or direct Postgres connection string from the Neon dashboard.
+
 ## Current Endpoints
 - `GET /api/health`
 - `GET /api/colleges?query=stanford`
 - `GET /api/colleges/:id/events`
 - `GET /api/events/:id`
 - `POST /api/admin/sync-events`
-- `POST /api/predict`
+- `POST /api/signup`
+- `POST /api/login`
+- `GET /api/users/:id/profile`
+- `POST /api/events/:id/join`
+
+## Deploying To Vercel
+This repo includes `vercel.json` so Vercel can build the Vite frontend and route `/api/*` requests to the Flask backend.
+
+Before deploying, add a Vercel environment variable named `DATABASE_URL` with your Neon Postgres connection string:
+```bash
+postgresql://USER:PASSWORD@HOST/neondb?sslmode=require
+```
+
+Use the real Neon database connection string, not the Neon Auth JWKS URL. Local SQLite is fine for development, but Vercel serverless functions need Neon/PostgreSQL for persistent data.
+
+Recommended Vercel settings:
+- Build command: `npm run build`
+- Output directory: `dist`
+- Python dependencies: installed from root `requirements.txt`
+
+Keep `auto_sync_on_start = false` in `backend/config.toml` on Vercel. For production event syncing, call `POST /api/admin/sync-events` manually or from a scheduled job.
 
 ## Event Sync
 UniSphere syncs supported school calendars through official Localist JSON APIs instead of scraping brittle HTML pages.
