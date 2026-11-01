@@ -1,0 +1,812 @@
+import sqlite3
+import ssl
+import json
+import hashlib
+import hmac
+import re
+import secrets
+import tomllib
+from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+import certifi
+
+DATABASE_PATH = Path(__file__).with_name("app.db")
+SCHEMA_PATH = Path(__file__).with_name("schema.sql")
+CONFIG_PATH = Path(__file__).with_name("config.toml")
+GMAIL_PATTERN = re.compile(r"^[A-Za-z0-9._%+-]+@gmail\.com$")
+FRIEND_REQUEST_LIMIT = 3
+DEFAULT_SYNC_CONFIG = {
+    "provider": "localist",
+    "days": 45,
+    "per_page": 50,
+    "auto_sync_on_start": False,
+    "auto_sync_interval_minutes": 360,
+}
+
+
+def get_connection():
+    connection = sqlite3.connect(DATABASE_PATH)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def initialize_database():
+    with get_connection() as connection:
+        connection.executescript(SCHEMA_PATH.read_text())
+        ensure_user_columns(connection)
+
+
+def ensure_database():
+    initialize_database()
+
+
+def load_sync_config():
+    if not CONFIG_PATH.exists():
+        return DEFAULT_SYNC_CONFIG.copy()
+
+    with CONFIG_PATH.open("rb") as config_file:
+        config = tomllib.load(config_file)
+
+    sync_config = DEFAULT_SYNC_CONFIG.copy()
+    sync_config.update(config.get("events_sync", {}))
+    return sync_config
+
+
+def ensure_user_columns(connection):
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(users)").fetchall()
+    }
+
+    if "college_id" not in columns:
+        connection.execute("ALTER TABLE users ADD COLUMN college_id INTEGER")
+
+    if "profile_image" not in columns:
+        connection.execute("ALTER TABLE users ADD COLUMN profile_image TEXT DEFAULT ''")
+
+
+def fetch_json(url):
+    request = Request(url, headers={"User-Agent": "UniSphere/0.1"})
+    context = ssl.create_default_context(cafile=certifi.where())
+
+    try:
+        with urlopen(request, timeout=12, context=context) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"Could not fetch event source: {url}") from error
+
+
+def get_college(college_id):
+    ensure_database()
+
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT id, name, city, state, country, latitude, longitude, event_calendar_url
+            FROM colleges
+            WHERE id = ?
+            """,
+            (college_id,),
+        ).fetchone()
+
+    return dict(row) if row else None
+
+
+def search_colleges(query):
+    ensure_database()
+    search_term = f"%{query.strip()}%"
+
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, name, city, state, country, latitude, longitude, event_calendar_url
+            FROM colleges
+            WHERE name LIKE ? OR city LIKE ? OR state LIKE ?
+            ORDER BY name
+            LIMIT 20
+            """,
+            (search_term, search_term, search_term),
+        ).fetchall()
+
+    return [dict(row) for row in rows]
+
+
+def get_college_options():
+    ensure_database()
+
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, name, city, state
+            FROM colleges
+            ORDER BY name
+            """
+        ).fetchall()
+
+    return [dict(row) for row in rows]
+
+
+def get_syncable_colleges():
+    ensure_database()
+
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, name, city, state, country, latitude, longitude, event_calendar_url
+            FROM colleges
+            WHERE event_calendar_url != ''
+            ORDER BY name
+            """
+        ).fetchall()
+
+    return [dict(row) for row in rows]
+
+
+def create_user(name, gmail, password, college_id):
+    ensure_database()
+    cleaned_name = normalize_name(name)
+    cleaned_gmail = (gmail or "").strip().lower()
+    selected_college_id = validate_user_input(cleaned_name, cleaned_gmail, password, college_id)
+    salt = secrets.token_hex(16)
+    password_hash = hash_password(password, salt)
+
+    try:
+        with get_connection() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO users (name, gmail, college_id, password_hash, password_salt)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (cleaned_name, cleaned_gmail, selected_college_id, password_hash, salt),
+            )
+            user_id = cursor.lastrowid
+    except sqlite3.IntegrityError as error:
+        message = str(error).lower()
+        if "users.name" in message:
+            raise ValueError("That name is already taken.") from error
+        if "users.gmail" in message:
+            raise ValueError("That Gmail is already registered.") from error
+        raise ValueError("Could not create user.") from error
+
+    return get_user_by_id(user_id)
+
+
+def authenticate_user(name, password):
+    ensure_database()
+    cleaned_name = normalize_name(name)
+
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT id, name, gmail, college_id, password_hash, password_salt
+            FROM users
+            WHERE name = ?
+            """,
+            (cleaned_name,),
+        ).fetchone()
+
+    if not row:
+        raise ValueError("Invalid name or password.")
+
+    expected_hash = hash_password(password or "", row["password_salt"])
+
+    if not hmac.compare_digest(expected_hash, row["password_hash"]):
+        raise ValueError("Invalid name or password.")
+
+    return get_user_by_id(row["id"])
+
+
+def get_user_by_id(user_id):
+    ensure_database()
+
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT
+              users.id,
+              users.name,
+              users.gmail,
+              users.college_id,
+              users.profile_image,
+              colleges.name AS college_name,
+              colleges.city AS college_city,
+              colleges.state AS college_state,
+              colleges.country AS college_country,
+              colleges.latitude AS college_latitude,
+              colleges.longitude AS college_longitude,
+              colleges.event_calendar_url AS college_event_calendar_url
+            FROM users
+            LEFT JOIN colleges ON colleges.id = users.college_id
+            WHERE users.id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+
+    return dict(row) if row else None
+
+
+def update_user_profile_image(user_id, profile_image):
+    ensure_database()
+    image_value = (profile_image or "").strip()
+
+    if image_value and not image_value.startswith("data:image/"):
+        raise ValueError("Profile image must be an image file.")
+
+    if len(image_value) > 500000:
+        raise ValueError("Profile image is too large.")
+
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE users
+            SET profile_image = ?
+            WHERE id = ?
+            """,
+            (image_value, user_id),
+        )
+
+    if cursor.rowcount == 0:
+        raise ValueError("User not found.")
+
+    return get_user_by_id(user_id)
+
+
+def get_user_friends(user_id):
+    ensure_database()
+
+    with get_connection() as connection:
+        user = connection.execute(
+            "SELECT id FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+
+        if not user:
+            raise ValueError("User not found.")
+
+        rows = connection.execute(
+            """
+            SELECT
+              users.id,
+              users.name,
+              users.profile_image,
+              colleges.name AS college_name,
+              colleges.city AS college_city,
+              colleges.state AS college_state
+            FROM friends
+            JOIN users ON users.id = friends.friend_id
+            LEFT JOIN colleges ON colleges.id = users.college_id
+            WHERE friends.user_id = ?
+            ORDER BY users.name
+            """,
+            (user_id,),
+        ).fetchall()
+
+    return [dict(row) for row in rows]
+
+
+def get_public_profile(user_id):
+    user = get_user_by_id(user_id)
+
+    if not user:
+        raise ValueError("User not found.")
+
+    public_user = {
+        "id": user["id"],
+        "name": user["name"],
+        "college_id": user["college_id"],
+        "profile_image": user["profile_image"],
+        "college_name": user["college_name"],
+        "college_city": user["college_city"],
+        "college_state": user["college_state"],
+        "college_country": user["college_country"],
+    }
+
+    return {
+        "profile": public_user,
+        "friends": get_user_friends(user_id),
+        "joined_events": get_joined_events(user_id),
+    }
+
+
+def get_pending_friend_requests(user_id):
+    ensure_database()
+
+    with get_connection() as connection:
+        user = connection.execute(
+            "SELECT id FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+
+        if not user:
+            raise ValueError("User not found.")
+
+        rows = connection.execute(
+            """
+            SELECT
+              friend_requests.id,
+              friend_requests.created_at,
+              users.id AS requester_id,
+              users.name AS requester_name,
+              users.profile_image AS requester_profile_image,
+              colleges.name AS requester_college_name,
+              colleges.state AS requester_college_state
+            FROM friend_requests
+            JOIN users ON users.id = friend_requests.requester_id
+            LEFT JOIN colleges ON colleges.id = users.college_id
+            WHERE friend_requests.receiver_id = ?
+              AND friend_requests.status = 'pending'
+            ORDER BY friend_requests.created_at
+            """,
+            (user_id,),
+        ).fetchall()
+
+    return [dict(row) for row in rows]
+
+
+def send_friend_request_by_name(user_id, friend_name):
+    ensure_database()
+    cleaned_friend_name = normalize_name(friend_name)
+
+    if not cleaned_friend_name:
+        raise ValueError("Enter a friend's username.")
+
+    with get_connection() as connection:
+        user = connection.execute(
+            "SELECT id, name FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+
+        if not user:
+            raise ValueError("User not found.")
+
+        friend = connection.execute(
+            "SELECT id, name FROM users WHERE name = ?",
+            (cleaned_friend_name,),
+        ).fetchone()
+
+        if not friend:
+            raise ValueError("No account uses that username.")
+
+        if friend["id"] == user["id"]:
+            raise ValueError("You cannot add yourself as a friend.")
+
+        existing_friend = connection.execute(
+            """
+            SELECT id
+            FROM friends
+            WHERE user_id = ? AND friend_id = ?
+            """,
+            (user["id"], friend["id"]),
+        ).fetchone()
+
+        if existing_friend:
+            raise ValueError("That friend is already on your profile.")
+
+        reverse_pending = connection.execute(
+            """
+            SELECT id
+            FROM friend_requests
+            WHERE requester_id = ?
+              AND receiver_id = ?
+              AND status = 'pending'
+            """,
+            (friend["id"], user["id"]),
+        ).fetchone()
+
+        if reverse_pending:
+            raise ValueError("They already sent you a request. Accept it from your popup.")
+
+        pending_request = connection.execute(
+            """
+            SELECT id
+            FROM friend_requests
+            WHERE requester_id = ?
+              AND receiver_id = ?
+              AND status = 'pending'
+            """,
+            (user["id"], friend["id"]),
+        ).fetchone()
+
+        if pending_request:
+            raise ValueError("You already sent that friend request.")
+
+        request_count = connection.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM friend_requests
+            WHERE requester_id = ?
+              AND receiver_id = ?
+            """,
+            (user["id"], friend["id"]),
+        ).fetchone()["count"]
+
+        if request_count >= FRIEND_REQUEST_LIMIT:
+            raise ValueError("You reached the friend request limit for that person.")
+
+        cursor = connection.execute(
+            """
+            INSERT INTO friend_requests (requester_id, receiver_id)
+            VALUES (?, ?)
+            """,
+            (user["id"], friend["id"]),
+        )
+        request_id = cursor.lastrowid
+
+    return {"id": request_id, "receiver_name": friend["name"]}
+
+
+def send_friend_request_by_id(user_id, friend_id):
+    ensure_database()
+
+    with get_connection() as connection:
+        friend = connection.execute(
+            "SELECT name FROM users WHERE id = ?",
+            (friend_id,),
+        ).fetchone()
+
+    if not friend:
+        raise ValueError("User not found.")
+
+    return send_friend_request_by_name(user_id, friend["name"])
+
+
+def respond_to_friend_request(user_id, request_id, action):
+    ensure_database()
+    cleaned_action = (action or "").strip().lower()
+
+    if cleaned_action not in {"accept", "decline"}:
+        raise ValueError("Choose accept or decline.")
+
+    with get_connection() as connection:
+        request_row = connection.execute(
+            """
+            SELECT id, requester_id, receiver_id
+            FROM friend_requests
+            WHERE id = ?
+              AND receiver_id = ?
+              AND status = 'pending'
+            """,
+            (request_id, user_id),
+        ).fetchone()
+
+        if not request_row:
+            raise ValueError("Friend request not found.")
+
+        new_status = "accepted" if cleaned_action == "accept" else "declined"
+        connection.execute(
+            """
+            UPDATE friend_requests
+            SET status = ?, responded_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (new_status, request_id),
+        )
+
+        if cleaned_action == "accept":
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO friends (user_id, friend_id)
+                VALUES (?, ?)
+                """,
+                (request_row["receiver_id"], request_row["requester_id"]),
+            )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO friends (user_id, friend_id)
+                VALUES (?, ?)
+                """,
+                (request_row["requester_id"], request_row["receiver_id"]),
+            )
+
+    return get_user_friends(user_id)
+
+
+def normalize_name(name):
+    return " ".join((name or "").strip().split())
+
+
+def validate_user_input(name, gmail, password, college_id):
+    if len(name) < 2 or len(name) > 80:
+        raise ValueError("Name must be between 2 and 80 characters.")
+
+    if not GMAIL_PATTERN.match(gmail):
+        raise ValueError("Signup requires a valid Gmail address.")
+
+    if len(password or "") < 8:
+        raise ValueError("Password must be at least 8 characters.")
+
+    try:
+        selected_college_id = int(college_id)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Choose your college.") from error
+
+    if not get_college(selected_college_id):
+        raise ValueError("Choose a supported college.")
+
+    return selected_college_id
+
+
+def hash_password(password, salt):
+    return hashlib.pbkdf2_hmac(
+        "sha256",
+        (password or "").encode("utf-8"),
+        salt.encode("utf-8"),
+        120000,
+    ).hex()
+
+
+def get_events_for_college(college_id, user_id=None):
+    ensure_database()
+
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+              events.id,
+              events.college_id,
+              events.title,
+              events.start_time,
+              events.location_name,
+              events.latitude,
+              events.longitude,
+              CASE WHEN joined.id IS NULL THEN 0 ELSE 1 END AS joined
+            FROM events
+            LEFT JOIN event_attendees AS joined
+              ON joined.event_id = events.id AND joined.user_id = ?
+            WHERE college_id = ?
+            ORDER BY start_time
+            """,
+            (user_id, college_id),
+        ).fetchall()
+
+    events = [{**dict(row), "joined": bool(row["joined"]), "friends_joined": []} for row in rows]
+
+    if user_id and events:
+        event_ids = [event["id"] for event in events]
+        placeholders = ",".join("?" for _ in event_ids)
+        with get_connection() as connection:
+            friend_rows = connection.execute(
+                f"""
+                SELECT
+                  event_attendees.event_id,
+                  users.name
+                FROM event_attendees
+                JOIN friends ON friends.friend_id = event_attendees.user_id
+                JOIN users ON users.id = event_attendees.user_id
+                WHERE friends.user_id = ?
+                  AND event_attendees.event_id IN ({placeholders})
+                ORDER BY users.name
+                """,
+                (user_id, *event_ids),
+            ).fetchall()
+        friends_by_event = {}
+
+        for friend_row in friend_rows:
+            friends_by_event.setdefault(friend_row["event_id"], []).append(friend_row["name"])
+
+        for event in events:
+            event["friends_joined"] = friends_by_event.get(event["id"], [])
+
+    return events
+
+
+def get_joined_events(user_id):
+    ensure_database()
+
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+              events.id,
+              events.college_id,
+              events.title,
+              events.start_time,
+              events.location_name,
+              events.latitude,
+              events.longitude,
+              colleges.name AS college_name
+            FROM event_attendees
+            JOIN events ON events.id = event_attendees.event_id
+            JOIN colleges ON colleges.id = events.college_id
+            WHERE event_attendees.user_id = ?
+            ORDER BY events.start_time
+            """,
+            (user_id,),
+        ).fetchall()
+
+    return [dict(row) for row in rows]
+
+
+def sync_localist_events_for_college(college_id, days=None, per_page=None):
+    sync_config = load_sync_config()
+    sync_days = int(days or sync_config["days"])
+    sync_per_page = int(per_page or sync_config["per_page"])
+    college = get_college(college_id)
+
+    if not college:
+        return []
+
+    query = urlencode({"days": sync_days, "pp": sync_per_page})
+    api_url = f"{college['event_calendar_url'].rstrip('/')}/api/2/events?{query}"
+    data = fetch_json(api_url)
+    normalized_events = [
+        normalize_localist_event(item.get("event", {}), college)
+        for item in data.get("events", [])
+        if item.get("event")
+    ]
+    normalized_events = [event for event in normalized_events if event["title"]]
+
+    with get_connection() as connection:
+        connection.execute("DELETE FROM events WHERE college_id = ?", (college_id,))
+        connection.executemany(
+            """
+            INSERT INTO events
+              (college_id, title, description, start_time, end_time, location_name, latitude, longitude, source_url)
+            VALUES
+              (:college_id, :title, :description, :start_time, :end_time, :location_name, :latitude, :longitude, :source_url)
+            """,
+            normalized_events,
+        )
+
+    return get_events_for_college(college_id)
+
+
+def sync_all_event_sources(days=None, per_page=None):
+    sync_config = load_sync_config()
+    colleges = get_syncable_colleges()
+    summary = {
+        "provider": sync_config["provider"],
+        "college_count": len(colleges),
+        "synced": [],
+        "failed": [],
+        "total_events": 0,
+    }
+
+    if sync_config["provider"] != "localist":
+        raise RuntimeError("Only the Localist event provider is configured right now.")
+
+    for college in colleges:
+        try:
+            events = sync_localist_events_for_college(
+                college["id"],
+                days=days,
+                per_page=per_page,
+            )
+            event_count = len(events)
+            summary["synced"].append(
+                {
+                    "college_id": college["id"],
+                    "college_name": college["name"],
+                    "event_count": event_count,
+                }
+            )
+            summary["total_events"] += event_count
+        except RuntimeError as error:
+            summary["failed"].append(
+                {
+                    "college_id": college["id"],
+                    "college_name": college["name"],
+                    "error": str(error),
+                }
+            )
+
+    return summary
+
+
+def normalize_localist_event(event, college):
+    instance = first_event_instance(event)
+    geo = event.get("geo") or {}
+    latitude = geo.get("latitude") or college["latitude"]
+    longitude = geo.get("longitude") or college["longitude"]
+    location_name = event.get("location_name") or event.get("address") or college["name"]
+
+    return {
+        "college_id": college["id"],
+        "title": event.get("title") or "",
+        "description": event.get("description_text") or "No description provided by the source calendar.",
+        "start_time": instance.get("start") or event.get("first_date") or "",
+        "end_time": instance.get("end") or event.get("last_date") or "",
+        "location_name": location_name,
+        "latitude": float(latitude),
+        "longitude": float(longitude),
+        "source_url": event.get("localist_url") or event.get("url") or college["event_calendar_url"],
+    }
+
+
+def first_event_instance(event):
+    instances = event.get("event_instances") or []
+
+    if not instances:
+        return {}
+
+    return instances[0].get("event_instance", {})
+
+
+def get_event(event_id, user_id=None):
+    ensure_database()
+
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT
+              events.id,
+              events.college_id,
+              events.title,
+              events.description,
+              events.start_time,
+              events.end_time,
+              events.location_name,
+              events.latitude,
+              events.longitude,
+              events.source_url,
+              colleges.name AS college_name,
+              COUNT(event_attendees.id) AS attendee_count
+            FROM events
+            JOIN colleges ON colleges.id = events.college_id
+            LEFT JOIN event_attendees ON event_attendees.event_id = events.id
+            WHERE events.id = ?
+            GROUP BY events.id
+            """,
+            (event_id,),
+        ).fetchone()
+
+        if not row:
+            return None
+
+        event = dict(row)
+
+        if user_id:
+            joined = connection.execute(
+                """
+                SELECT id
+                FROM event_attendees
+                WHERE event_id = ? AND user_id = ?
+                """,
+                (event_id, user_id),
+            ).fetchone()
+            event["joined"] = bool(joined)
+        else:
+            event["joined"] = False
+
+    return event
+
+
+def set_event_join_status(event_id, user_id, joined):
+    ensure_database()
+
+    with get_connection() as connection:
+        user = connection.execute(
+            "SELECT id FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        event = connection.execute(
+            "SELECT id FROM events WHERE id = ?",
+            (event_id,),
+        ).fetchone()
+
+        if not user:
+            raise ValueError("User not found.")
+
+        if not event:
+            raise ValueError("Event not found.")
+
+        if joined:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO event_attendees (user_id, event_id)
+                VALUES (?, ?)
+                """,
+                (user_id, event_id),
+            )
+        else:
+            connection.execute(
+                """
+                DELETE FROM event_attendees
+                WHERE user_id = ? AND event_id = ?
+                """,
+                (user_id, event_id),
+            )
+
+    return get_event(event_id, user_id=user_id)
