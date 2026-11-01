@@ -51,6 +51,7 @@ Before deploying, add a Vercel environment variable named `DATABASE_URL` with yo
 ```bash
 postgresql://USER:PASSWORD@HOST/neondb?sslmode=require
 ```
+In the actual demo, render is used.
 
 Use the real Neon database connection string, not the Neon Auth JWKS URL. Local SQLite is fine for development, but Vercel serverless functions need Neon/PostgreSQL for persistent data.
 
