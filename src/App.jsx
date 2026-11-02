@@ -6,6 +6,11 @@ const USA_CENTER = [39.5, -98.35];
 const DEFAULT_ZOOM = 4;
 const MAP_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>';
 const MAP_TILE_URL = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+const API_BASE_URL = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
+
+function apiUrl(path) {
+  return `${API_BASE_URL}${path}`;
+}
 
 const eventPinIcon = divIcon({
   className: 'event-pin',
@@ -169,7 +174,7 @@ function App() {
   useEffect(() => {
     async function loadCollegeOptions() {
       try {
-        const response = await fetch('/api/college-options');
+        const response = await fetch(apiUrl('/api/college-options'));
         const data = await response.json();
         setCollegeOptions(data.colleges || []);
       } catch {
@@ -189,7 +194,7 @@ function App() {
       }
 
       try {
-        const response = await fetch(`/api/users/${currentUser.id}`);
+        const response = await fetch(apiUrl(`/api/users/${currentUser.id}`));
         const data = await response.json();
 
         if (response.ok) {
@@ -256,7 +261,7 @@ function App() {
     setEvents([]);
 
     try {
-      const response = await fetch(`/api/colleges?query=${encodeURIComponent(query)}`);
+      const response = await fetch(apiUrl(`/api/colleges?query=${encodeURIComponent(query)}`));
       const data = await response.json();
       setColleges(data.colleges);
       setStatus(
@@ -278,7 +283,7 @@ function App() {
 
     try {
       const userQuery = currentUser?.id ? `?user_id=${currentUser.id}` : '';
-      const response = await fetch(`/api/colleges/${college.id}/events${userQuery}`);
+      const response = await fetch(apiUrl(`/api/colleges/${college.id}/events${userQuery}`));
       const data = await response.json();
 
       if (!response.ok) {
@@ -300,7 +305,7 @@ function App() {
 
     try {
       const userQuery = currentUser?.id ? `?user_id=${currentUser.id}` : '';
-      const response = await fetch(`/api/events/${eventId}${userQuery}`);
+      const response = await fetch(apiUrl(`/api/events/${eventId}${userQuery}`));
       const data = await response.json();
       setSelectedEvent(data.event);
       setStatus(`Loaded details for ${data.event.title}.`);
@@ -325,7 +330,7 @@ function App() {
     setLoading(true);
 
     try {
-      const response = await fetch(`/api/events/${selectedEvent.id}/join`, {
+      const response = await fetch(apiUrl(`/api/events/${selectedEvent.id}/join`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_id: currentUser.id, joined: nextJoined }),
@@ -402,7 +407,7 @@ function App() {
     }
 
     try {
-      const response = await fetch(`/api/users/${currentUser.id}/friends`);
+      const response = await fetch(apiUrl(`/api/users/${currentUser.id}/friends`));
       const data = await readApiJson(response, 'Friends API returned a page instead of data. Restart the backend and Vite dev server.');
 
       if (!response.ok) {
@@ -421,7 +426,7 @@ function App() {
     }
 
     try {
-      const response = await fetch(`/api/users/${currentUser.id}/friend-requests`);
+      const response = await fetch(apiUrl(`/api/users/${currentUser.id}/friend-requests`));
       const data = await readApiJson(response, 'Friend requests API returned a page instead of data. Restart the backend and Vite dev server.');
 
       if (!response.ok) {
@@ -440,7 +445,7 @@ function App() {
     }
 
     try {
-      const response = await fetch(`/api/users/${currentUser.id}/profile`);
+      const response = await fetch(apiUrl(`/api/users/${currentUser.id}/profile`));
       const data = await readApiJson(response, 'Profile API returned a page instead of data. Restart the backend and Vite dev server.');
 
       if (!response.ok) {
@@ -470,7 +475,7 @@ function App() {
     setFriendMessage('Sending friend request...');
 
     try {
-      const response = await fetch(`/api/users/${currentUser.id}/friends`, {
+      const response = await fetch(apiUrl(`/api/users/${currentUser.id}/friends`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: friendName }),
@@ -504,7 +509,7 @@ function App() {
     setAuthMessage('Loading profile...');
 
     try {
-      const response = await fetch(`/api/users/${userId}/profile`);
+      const response = await fetch(apiUrl(`/api/users/${userId}/profile`));
       const data = await readApiJson(response, 'Profile API returned a page instead of data. Restart the backend and Vite dev server.');
 
       if (!response.ok) {
@@ -537,7 +542,7 @@ function App() {
     setAuthMessage('Sending friend request...');
 
     try {
-      const response = await fetch(`/api/users/${currentUser.id}/friends`, {
+      const response = await fetch(apiUrl(`/api/users/${currentUser.id}/friends`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ friend_id: viewedProfile.id }),
@@ -561,7 +566,7 @@ function App() {
 
     try {
       const userQuery = currentUser?.id ? `?user_id=${currentUser.id}` : '';
-      const response = await fetch(`/api/events/${eventId}${userQuery}`);
+      const response = await fetch(apiUrl(`/api/events/${eventId}${userQuery}`));
       const data = await response.json();
 
       if (!response.ok) {
@@ -594,7 +599,7 @@ function App() {
     setFriendMessage(action === 'accept' ? 'Accepting request...' : 'Declining request...');
 
     try {
-      const response = await fetch(`/api/users/${currentUser.id}/friend-requests/${requestId}`, {
+      const response = await fetch(apiUrl(`/api/users/${currentUser.id}/friend-requests/${requestId}`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action }),
@@ -634,7 +639,7 @@ function App() {
       setAuthMessage('Updating profile image...');
 
       try {
-        const response = await fetch(`/api/users/${currentUser.id}/profile-image`, {
+        const response = await fetch(apiUrl(`/api/users/${currentUser.id}/profile-image`), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ profile_image: reader.result }),
@@ -662,7 +667,7 @@ function App() {
     setAuthMessage('Checking your login...');
 
     try {
-      const response = await fetch('/api/login', {
+      const response = await fetch(apiUrl('/api/login'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(loginForm),
@@ -690,7 +695,7 @@ function App() {
     setAuthMessage('Creating your account...');
 
     try {
-      const response = await fetch('/api/signup', {
+      const response = await fetch(apiUrl('/api/signup'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(signupForm),
