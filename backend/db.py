@@ -49,6 +49,10 @@ def get_connection():
     return connection
 
 
+def get_database_mode():
+    return "postgres" if USE_POSTGRES else "sqlite"
+
+
 class PostgresConnection:
     def __init__(self, connection):
         self.connection = connection

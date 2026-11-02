@@ -13,6 +13,7 @@ if str(CURRENT_DIR) not in sys.path:
 from db import (
     authenticate_user,
     create_user,
+    get_database_mode,
     get_college_options,
     get_college,
     get_event,
@@ -39,7 +40,7 @@ sync_thread_started = False
 
 @app.get("/api/health")
 def health():
-    return jsonify({"status": "Backend is running"})
+    return jsonify({"database": get_database_mode(), "status": "Backend is running"})
 
 
 @app.post("/api/admin/sync-events")

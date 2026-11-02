@@ -26,11 +26,11 @@ function getStoredUser() {
       .split('; ')
       .find((item) => item.startsWith('eventAtlasUser='));
 
-    if (!cookie) {
-      return null;
+    if (cookie) {
+      return JSON.parse(decodeURIComponent(cookie.split('=')[1])) || null;
     }
 
-    return JSON.parse(decodeURIComponent(cookie.split('=')[1])) || null;
+    return JSON.parse(localStorage.getItem('eventAtlasUser')) || null;
   } catch {
     return null;
   }
@@ -52,10 +52,12 @@ function setUserCookie(user) {
   };
   const encodedUser = encodeURIComponent(JSON.stringify(cookieUser));
   document.cookie = `eventAtlasUser=${encodedUser}; Max-Age=604800; Path=/; SameSite=Lax`;
+  localStorage.setItem('eventAtlasUser', JSON.stringify(cookieUser));
 }
 
 function clearUserCookie() {
   document.cookie = 'eventAtlasUser=; Max-Age=0; Path=/; SameSite=Lax';
+  localStorage.removeItem('eventAtlasUser');
 }
 
 async function readApiJson(response, fallbackMessage) {
