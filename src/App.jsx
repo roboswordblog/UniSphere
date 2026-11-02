@@ -1280,7 +1280,7 @@ function App() {
                 >
                   <span className="event-row-title">
                     <span>{event.title}</span>
-                    {event.joined && <strong>Joined</strong>}
+                    {event.joined && <strong>(joined)</strong>}
                   </span>
                   <small>{event.location_name}</small>
                   {event.friends_joined?.length > 0 && (
